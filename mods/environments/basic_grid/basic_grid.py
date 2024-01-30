@@ -1,14 +1,12 @@
-from collections import namedtuple
 from copy import copy
-import functools
-import random
-from sys import flags
-from PIL import Image
+import dis
+from math import dist, sqrt
+from unittest import signals
 from gymnasium.spaces import Discrete, Box, Tuple, Dict
+from networkx import adamic_adar_index
 import numpy as np
 from pettingzoo import ParallelEnv
 from gymnasium.spaces import Discrete, MultiDiscrete
-from zmq import has
 import pygame
 
 from mods.environments.basic_grid.basic_agent import BasicAgent
@@ -26,7 +24,6 @@ DANGER = 0
 FOOD = 1
 WALK = 2
 
-
 IDLE = 0
 MOVE_UP = 1
 MOVE_DOWN = 2
@@ -34,13 +31,12 @@ MOVE_LEFT = 3
 MOVE_RIGHT = 4
 EAT = 5
 EMIT_SIGNAL = 6
-
-
+DROP_FOOD = 7
 
 class BasicGrid(ParallelEnv):
     metadata = {
         "name": "basic_grid",
-        "render_modes": ["human", "rgb_array"],
+        "render_modes": ["human", "rgb_array", None],
         "render_fps": 65
     }
 
@@ -67,9 +63,10 @@ class BasicGrid(ParallelEnv):
         self.window = None
         self.clock = None
 
-        self.attributes = namedtuple("attributes", ["danger_energy_drain", "food_energy_gain"])
-        self.attributes.danger_energy_drain = 1 # type: ignore
-        self.attributes.food_energy_gain = 1 # type: ignore
+        self.attributes = {}
+        self.attributes['danger_energy_drain'] = 1 
+        self.attributes['food_energy_gain'] = 1 
+        self.attributes['signal_max_range'] = 300 
 
     def _load_grid_from_file(self, image):
         self.grid_size = image.size
@@ -88,10 +85,10 @@ class BasicGrid(ParallelEnv):
         for x in range(self.grid_size[0]):
             for y in range(self.grid_size[1]):                
                 self.grid[x, y] = np.random.randint(0, 255, size=3, dtype=np.uint8)
-                if np.linalg.norm(np.array([x,y]) - np.array([self.grid_size[0]/2, self.grid_size[1]/2])) > 20:
-                    self.grid[x, y,0] = 127
-                else:
-                    self.grid[x, y,0] = 255
+                # if np.linalg.norm(np.array([x,y]) - np.array([self.grid_size[0]/2, self.grid_size[1]/2])) > 20:
+                #     self.grid[x, y,0] = 127
+                # else:
+                #     self.grid[x, y,0] = 255
 
     def reset(self, seed=None, options=None):
         np.random.seed(seed)
@@ -110,10 +107,37 @@ class BasicGrid(ParallelEnv):
             assert len(possible_positions) > 0
             agent.position = possible_positions[np.random.randint(0, len(possible_positions))]
             self._occupied_positions.add(agent.position)
-            agent.attributes.energy = 100
+            agent.attributes.energy = agent.attributes.max_energy
 
         self.iteration = 0
         observations = {a.id: {} for a in self.agents}
+        for agent in self.agents:
+            observations[agent.id]['grid_perception'] = [[0] * 3] * 5
+            observations[agent.id]['grid_perception'][0][DANGER] = self.grid[agent.position][DANGER]
+            observations[agent.id]['grid_perception'][0][WALK] = self.grid[agent.position][WALK]
+            observations[agent.id]['grid_perception'][0][FOOD] = self.grid[agent.position][FOOD]
+            observations[agent.id]['grid_perception'][1][DANGER] = self.grid[agent.position[0], agent.position[1]-1][DANGER]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][1][WALK] = self.grid[agent.position[0], agent.position[1]-1][WALK]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][1][FOOD] = self.grid[agent.position[0], agent.position[1]-1][FOOD]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][2][DANGER] = self.grid[agent.position[0]+1, agent.position[1]][DANGER]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][2][WALK] = self.grid[agent.position[0]+1, agent.position[1]][WALK]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][2][FOOD] = self.grid[agent.position[0]+1, agent.position[1]][FOOD]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][3][DANGER] = self.grid[agent.position[0], agent.position[1]+1][DANGER]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][3][WALK] = self.grid[agent.position[0], agent.position[1]+1][WALK]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][3][FOOD] = self.grid[agent.position[0], agent.position[1]+1][FOOD]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][4][DANGER] = self.grid[agent.position[0]-1, agent.position[1]][DANGER]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['grid_perception'][4][WALK] = self.grid[agent.position[0]-1, agent.position[1]][WALK]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['grid_perception'][4][FOOD] = self.grid[agent.position[0]-1, agent.position[1]][FOOD]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['average_signal_strength'] = 0 
+            observations[agent.id]['average_signal_type'] = 0
+            observations[agent.id]['average_signal_direction_x'] = 0
+            observations[agent.id]['average_signal_direction_y'] = 0
+            observations[agent.id]['closest_signal_strength'] = 0
+            observations[agent.id]['closest_signal_type'] = 0
+            observations[agent.id]['closest_signal_direction_x'] = 0
+            observations[agent.id]['closest_signal_direction_y'] = 0
+            observations[agent.id]['energy'] = agent.attributes.energy / agent.attributes.max_energy
+
         infos = {a.id: {} for a in self.agents}
         
         if self.render_mode == "human":
@@ -125,76 +149,165 @@ class BasicGrid(ParallelEnv):
         for agent in self.agents:
             action = actions[agent.id]
             discrete, box = action
-            if discrete == MOVE_DOWN:
-                if agent.position[1] < self.grid_size[1]-1:
-                    new_position = (agent.position[0], agent.position[1]+1) 
-                    if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]: #
-                        if new_position not in self._occupied_positions:
-                            self._occupied_positions.remove(agent.position)
-                            agent.position = new_position
-                            self._occupied_positions.add(agent.position)
-                            agent.attributes.energy -= agent.attributes.movement_energy_cost # type: ignore
-            elif discrete == MOVE_UP:
-                if agent.position[1] > 0:
-                    new_position = (agent.position[0], agent.position[1]-1) 
-                    if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
-                        if new_position not in self._occupied_positions:
-                            self._occupied_positions.remove(agent.position)
-                            agent.position = new_position
-                            self._occupied_positions.add(agent.position)
-                            agent.attributes.energy -= agent.attributes.movement_energy_cost # type: ignore
-            elif discrete == MOVE_LEFT:
-                if agent.position[0] > 0:
-                    new_position = (agent.position[0]-1, agent.position[1]) 
-                    if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
-                        if new_position not in self._occupied_positions:
-                            self._occupied_positions.remove(agent.position)
-                            agent.position = new_position
-                            self._occupied_positions.add(agent.position)
-                            agent.attributes.energy -= agent.attributes.movement_energy_cost # type: ignore
-            elif discrete == MOVE_RIGHT:
-                if agent.position[0] < self.grid_size[0]-1:
-                    new_position = (agent.position[0]+1, agent.position[1]) 
-                    if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
-                        if new_position not in self._occupied_positions:
-                            self._occupied_positions.remove(agent.position)
-                            agent.position = new_position
-                            self._occupied_positions.add(agent.position)
-                            agent.attributes.energy -= agent.attributes.movement_energy_cost # type: ignore
-                    
-            elif discrete == EAT:
-                if self.grid[agent.position][FOOD] > 40:
-                    agent.attributes.energy += 40
-                    self.grid[agent.position][FOOD] -= 40
-            
-            elif discrete == EMIT_SIGNAL:
-                range = box[0] * 10
-                self.emitted_signals.append({"position": agent.position, "range": range, "type": box[1]})
-                agent.attributes.energy -= agent.attributes.signal_emit_cost * box[0] # type: ignore
+            if agent.attributes.energy > 0:
+                if discrete == MOVE_DOWN:
+                    if agent.position[1] < self.grid_size[1]-1:
+                        new_position = (agent.position[0], agent.position[1]+1) 
+                        if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]: #
+                            if new_position not in self._occupied_positions:
+                                self._occupied_positions.remove(agent.position)
+                                agent.position = new_position
+                                self._occupied_positions.add(agent.position)
+                                agent.attributes.energy -= agent.attributes.movement_energy_cost
+                elif discrete == MOVE_UP:
+                    if agent.position[1] > 0:
+                        new_position = (agent.position[0], agent.position[1]-1) 
+                        if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
+                            if new_position not in self._occupied_positions:
+                                self._occupied_positions.remove(agent.position)
+                                agent.position = new_position
+                                self._occupied_positions.add(agent.position)
+                                agent.attributes.energy -= agent.attributes.movement_energy_cost
+                elif discrete == MOVE_LEFT:
+                    if agent.position[0] > 0:
+                        new_position = (agent.position[0]-1, agent.position[1]) 
+                        if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
+                            if new_position not in self._occupied_positions:
+                                self._occupied_positions.remove(agent.position)
+                                agent.position = new_position
+                                self._occupied_positions.add(agent.position)
+                                agent.attributes.energy -= agent.attributes.movement_energy_cost 
+                elif discrete == MOVE_RIGHT:
+                    if agent.position[0] < self.grid_size[0]-1:
+                        new_position = (agent.position[0]+1, agent.position[1]) 
+                        if np.random.randint(0, 255, size=1, dtype=np.uint8) < self.grid[new_position][WALK]:
+                            if new_position not in self._occupied_positions:
+                                self._occupied_positions.remove(agent.position)
+                                agent.position = new_position
+                                self._occupied_positions.add(agent.position)
+                                agent.attributes.energy -= agent.attributes.movement_energy_cost 
+                        
+                elif discrete == EAT:
+                    EAT_AMOUNT = self.attributes['food_energy_gain']
+                    food_amount = self.grid[agent.position][FOOD] / 255.0
+                    food_amount = min(food_amount, EAT_AMOUNT, agent.attributes.max_energy - agent.attributes.energy)
+                    agent.attributes.energy += food_amount
+                    self.grid[agent.position][FOOD] -= int(food_amount * 255)
 
-            agent.attributes.energy -= self.grid[agent.position][DANGER] * self.attributes.danger_energy_drain # type: ignore
-            agent.attributes.energy -= agent.attributes.idle_energy_cost
+                elif discrete == DROP_FOOD:
+                    DROP_AMOUNT = 0.1
+                    if self.grid[agent.position][FOOD] > DROP_AMOUNT:
+                        agent.attributes.energy -= DROP_AMOUNT
+                        self.grid[agent.position][FOOD] += int(DROP_AMOUNT * 255)
+                
+                elif discrete == EMIT_SIGNAL:
+                    range = box[0] * agent.attributes.signal_emit_range * self.attributes['signal_max_range']
+                    if range > 0:
+                        self.emitted_signals.append({"position": agent.position, "range": range, "type": box[1]})
+                        agent.attributes.energy -= agent.attributes.signal_emit_cost * box[0] 
+                
+                agent.attributes.energy -= self.grid[agent.position][DANGER] / 255.0 * self.attributes['danger_energy_drain']
+                agent.attributes.energy -= agent.attributes.idle_energy_cost
+        
+        observations = {a.id: {} for a in self.agents}
+        received_signals = 0
+
+        for agent in self.agents:
+            avg_signal_stregth = 0
+            avg_signal_type = 0
+            avg_signal_direction_x = 0
+            avg_signal_direction_y = 0
+            avg_signal_count = 0
+            avg_signal_weight_total = 0
+
+            strongest_signal_strength = 0
+            strongest_signal_type = 0
+            strongest_signal_direction_x = 0
+            strongest_signal_direction_y = 0
+            
+            for signal in self.emitted_signals:
+                signal_direction_x = signal["position"][0] - agent.position[0]
+                signal_direction_y = signal["position"][1] - agent.position[1]
+                distane_to_signal = sqrt(signal_direction_x**2 + signal_direction_y**2)
+                
+                if distane_to_signal == 0:
+                    continue
+                signal_direction_x /= distane_to_signal
+                signal_direction_y /= distane_to_signal
+
+                signal_strength = 1 - distane_to_signal / signal["range"]
+                signal_type = signal["type"]
+                
+                if signal_strength > agent.attributes.signal_hear_range:  # > < bug?
+                    received_signals += 1
+                    avg_signal_stregth += signal_strength
+                    avg_signal_type += signal_type * signal_strength
+                    avg_signal_direction_x += signal_direction_x * signal_strength
+                    avg_signal_direction_y += signal_direction_y * signal_strength
+                    avg_signal_count += 1
+                    avg_signal_weight_total += signal_strength
+
+                    if signal_strength > strongest_signal_strength:
+                        strongest_signal_strength = signal_strength
+                        strongest_signal_type = signal_type
+                        strongest_signal_direction_x = signal_direction_x
+                        strongest_signal_direction_y = signal_direction_y
+            if avg_signal_count > 0:
+                avg_signal_stregth /= avg_signal_weight_total 
+                avg_signal_type /= avg_signal_weight_total
+                avg_signal_direction_x /= avg_signal_weight_total
+                avg_signal_direction_y /= avg_signal_weight_total
+            
+            observations[agent.id]['grid_perception'] = [[0] * 3] * 5
+            observations[agent.id]['grid_perception'][0][DANGER] = self.grid[agent.position][DANGER]
+            observations[agent.id]['grid_perception'][0][WALK] = self.grid[agent.position][WALK]
+            observations[agent.id]['grid_perception'][0][FOOD] = self.grid[agent.position][FOOD]
+            observations[agent.id]['grid_perception'][1][DANGER] = self.grid[agent.position[0], agent.position[1]-1][DANGER]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][1][WALK] = self.grid[agent.position[0], agent.position[1]-1][WALK]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][1][FOOD] = self.grid[agent.position[0], agent.position[1]-1][FOOD]/ 255.0 if agent.position[1] > 0 else 0
+            observations[agent.id]['grid_perception'][2][DANGER] = self.grid[agent.position[0]+1, agent.position[1]][DANGER]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][2][WALK] = self.grid[agent.position[0]+1, agent.position[1]][WALK]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][2][FOOD] = self.grid[agent.position[0]+1, agent.position[1]][FOOD]/ 255.0 if agent.position[0] < self.grid_size[0]-1 else 0
+            observations[agent.id]['grid_perception'][3][DANGER] = self.grid[agent.position[0], agent.position[1]+1][DANGER]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][3][WALK] = self.grid[agent.position[0], agent.position[1]+1][WALK]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][3][FOOD] = self.grid[agent.position[0], agent.position[1]+1][FOOD]/ 255.0 if agent.position[1] < self.grid_size[1]-1 else 0
+            observations[agent.id]['grid_perception'][4][DANGER] = self.grid[agent.position[0]-1, agent.position[1]][DANGER]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['grid_perception'][4][WALK] = self.grid[agent.position[0]-1, agent.position[1]][WALK]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['grid_perception'][4][FOOD] = self.grid[agent.position[0]-1, agent.position[1]][FOOD]/ 255.0 if agent.position[0] > 0 else 0
+            observations[agent.id]['average_signal_strength'] = avg_signal_stregth # TODO normalize
+            observations[agent.id]['average_signal_type'] = avg_signal_type
+            observations[agent.id]['average_signal_direction_x'] = avg_signal_direction_x
+            observations[agent.id]['average_signal_direction_y'] = avg_signal_direction_y
+            observations[agent.id]['closest_signal_strength'] = strongest_signal_strength
+            observations[agent.id]['closest_signal_type'] = strongest_signal_type
+            observations[agent.id]['closest_signal_direction_x'] = strongest_signal_direction_x
+            observations[agent.id]['closest_signal_direction_y'] = strongest_signal_direction_y
+            observations[agent.id]['energy'] = agent.attributes.energy / agent.attributes.max_energy
+
         # check for terminations
         terminations = {a.id: a.attributes.energy <= 0 for a in self.agents}
         # picks random agent and sets its termination to True
         # terminations[np.random.choice(self.agents)] = True
 
-        rewards = {a.id: 0 for a in self.agents}
+        rewards = {a.id: 0.0 for a in self.agents}
         for agent in self.agents:
-            if agent.attributes.energy > agent.attributes.max_energy/2:
-                rewards[agent.id] += 1
-            if terminations[agent.id]:
-                rewards[agent.id] -= 10
+            rewards[agent.id] += received_signals * 0.1
+            # if agent.attributes.energy > agent.attributes.max_energy/2:
+            #     rewards[agent.id] += 1
+            if agent.attributes.energy > agent.attributes.max_energy/4:
+                rewards[agent.id] += 0.1
+            if not terminations[agent.id]:
+                rewards[agent.id] += 10
         # check for truncations
         truncations = {a.id: False for a in self.agents}
         self.iteration += 1
         if self.iteration >= self.max_iterations:
             truncations = {a.id: True for a in self.agents}
             for agent in self.agents:
-                rewards[agent.id] += 10
+                rewards[agent.id] += 100
 
-        observations = {a.id: {} for a in self.agents}
-        # observations = 
+        
+        
         infos = {a.id: {} for a in self.agents}
         if all(terminations.values()) or all(truncations.values()):
             self.agents = []
@@ -274,9 +387,14 @@ class BasicGrid(ParallelEnv):
             )
 
         for agent in self.agents:
+            color_value = int(agent.attributes.energy/agent.attributes.max_energy*255)
+            if color_value > 255:
+                color_value = 255
+            elif color_value < 0:
+                color_value = 0
             pygame.draw.circle(
                 canvas,
-                (255,255,255),
+                (color_value, color_value, color_value),
                 (agent.position[0] * pixel_size+pixel_size/2, agent.position[1] * pixel_size+pixel_size/2),
                 pixel_size / 3,
             )
@@ -335,9 +453,17 @@ class BasicGrid(ParallelEnv):
             pygame.quit()
 
     '''
+    GRID
+    FOOD CONTENT 
+    AVERAGE_SIGNAL_STRENGTH
+    AVERAGE_SIGNAL_TYPE
+    AVERAGE_SIGNAL_DIRECTION_X
+    AVERAGE_SIGNAL_DIRECTION_Y
+    CLOSEST_SIGNAL_STRENGTH 
+    CLOSEST_SIGNAL_TYPE
+    CLOSEST_SIGNAL_DIRECTION_X
+    CLOSEST_SIGNAL_DIRECTION_Y
     ENERGY
-    SINGAL_AVERAGE
-    BOXES_AROUND
     '''
 
     # @functools.lru_cache(maxsize=None)
@@ -346,9 +472,16 @@ class BasicGrid(ParallelEnv):
             self.observation_spaces = dict()
         if agent_id not in self.observation_spaces or self.observation_spaces[agent_id] is None:
             self.observation_spaces[agent_id] = Dict({
-                'grid_perception': MultiDiscrete([3] * 5),
-                'food_content': Box(low=0, high=1, shape=(1,), dtype=np.float32),
-                'signals_from_other_agents': Box(low=0, high=1, shape=(1,), dtype=np.float32)
+                'grid_perception': Box(low=0, high=1, shape=(5,3), dtype=np.float32),
+                'average_signal_strength': Box(low=0, high=1, shape=(1,), dtype=np.float32),
+                'average_signal_type': Box(low=0, high=1, shape=(1,), dtype=np.float32),
+                'average_signal_direction_x': Box(low=-1, high=1, shape=(1,), dtype=np.float32),
+                'average_signal_direction_y': Box(low=-1, high=1, shape=(1,), dtype=np.float32),
+                'closest_signal_strength': Box(low=0, high=1, shape=(1,), dtype=np.float32),
+                'closest_signal_type': Box(low=0, high=1, shape=(1,), dtype=np.float32),
+                'closest_signal_direction_x': Box(low=-1, high=1, shape=(1,), dtype=np.float32),
+                'closest_signal_direction_y': Box(low=-1, high=1, shape=(1,), dtype=np.float32),
+                'energy': Box(low=0, high=1, shape=(1,), dtype=np.float32),
             })
         return self.observation_spaces[agent_id]
 
@@ -360,6 +493,7 @@ class BasicGrid(ParallelEnv):
         MOVE_LEFT
         MOVE_RIGHT
         EAT
+        DROP_FOOD
     BOX ACTIONS:
         SIGNAL: STRENGTH TYPE
     '''
@@ -369,5 +503,5 @@ class BasicGrid(ParallelEnv):
         if hasattr(self, 'action_spaces') is False:
             self.action_spaces = dict()
         if agent_id not in self.action_spaces or self.action_spaces[agent_id] is None:
-            self.action_spaces[agent_id] = Tuple((Discrete(7,), Box(low=0, high=1, shape=(2,), dtype=np.float32)))
+            self.action_spaces[agent_id] = Tuple((Discrete(8,), Box(low=0, high=1, shape=(2,), dtype=np.float32)))
         return self.action_spaces[agent_id]

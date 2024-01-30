@@ -1,0 +1,5 @@
+@startuml hierarchy-swarm
+ML_Agent -- Environment
+Environment -- Env_Agent
+@enduml
+

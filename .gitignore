@@ -162,3 +162,8 @@ cython_debug/
 
 # simulations 
 /data/simulations/*
+/data/simulations_old/*
+
+# krita
+*.kra
+*.kra~
