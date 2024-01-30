@@ -1,5 +1,4 @@
 from mods.brains.brain import Brain
-import pprint as pp
 
 class RandomBrain(Brain):
     def __init__(self, id = None):
